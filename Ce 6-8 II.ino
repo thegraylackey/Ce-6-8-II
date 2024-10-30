@@ -1,6 +1,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
+#include <limits.h> // Include for ULONG_MAX
 
 // Define the I2C address and reset pin
 Adafruit_SH1107 display(64, 128, &Wire);
@@ -21,8 +22,8 @@ Adafruit_SH1107 display(64, 128, &Wire);
 #define LED_PIN 4
 
 // Define PWM frequency and resolution
-#define PWM_FREQUENCY 200
-#define PWM_RESOLUTION 10
+#define PWM_FREQUENCY 100
+#define PWM_RESOLUTION 8
 
 // Button states
 int lastButtonStateA = HIGH;
@@ -35,26 +36,29 @@ int buttonStateC = HIGH;
 // Motor speed
 double motorSpeed = 0;
 
-//Update Interval
-const double updateInterval = 250;
+// Update Interval
+const double updateInterval = 50;
 
 // Speed increment
-const int speedIncrement = 10;
+const int speedIncrement = 30;
 
 // Encoder settings
-volatile unsigned long pulseCount = 0;
-unsigned long lastTime = 0;
+volatile unsigned long pulseTimes[16] = { 0 };
+volatile int pulseIndex = 0;
+unsigned long lastPulseTime = 0;
 const unsigned int slots = 16; // Number of fins in the encoder wheel
-
-// Debounce settings
-volatile unsigned long lastPulseTime = 0;
-const unsigned long debounceDelay = 50; // 50ms debounce delay in microseconds
 
 // PI control settings
 float targetRPM = 0.0; // Target RPM
-float Kp = 0.05; // Proportional gain
-float Ki = 0.05; // Integral gain
+float Kp = 0.01; // Proportional gain
+float Ki = 0.01; // Integral gain
 float integral = 0.0; // Integral term
+
+// Debounce delay
+volatile unsigned long debounceDelay = 25; // Initial debounce delay
+
+// Time tracking
+unsigned long lastTime = 0; // Initialize lastTime
 
 void setup() {
     // Initialize serial communication
@@ -90,6 +94,9 @@ void setup() {
     // Initialize LED pin
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
+
+    // Initialize lastTime
+    lastTime = millis();
 
     Serial.println("Setup Finished");
 }
@@ -147,7 +154,7 @@ void loop() {
     if (targetRPM == 0) {
         // Stop motor
         ledcWrite(MOTOR_FORWARD, 0);
-        ledcWrite(MOTOR_REVERSE, 0); 
+        ledcWrite(MOTOR_REVERSE, 0);
         motorSpeed = 0;
         integral = 0;
     }
@@ -169,22 +176,50 @@ void loop() {
     else {
         digitalWrite(LED_PIN, LOW);
     }
+
+    // Check if no new pulse is recorded after 250ms
+    if (millis() - lastPulseTime > 250) {
+        recordPulse(ULONG_MAX); // Use ULONG_MAX to indicate no new pulse
+    }
 }
 
 void countPulse() {
     unsigned long currentTime = millis();
-    if ((currentTime - lastPulseTime) > debounceDelay) {
-        pulseCount++;
+    unsigned long pulseDuration = currentTime - lastPulseTime;
+    if (pulseDuration > debounceDelay) {
         lastPulseTime = currentTime;
+        // Record pulse duration in the array
+        recordPulse(pulseDuration);
     }
 }
 
-double calculateSpeed() {
-    // Calculate RPM based on the number of pulses in the updateInterval
-    double rpm = (pulseCount / (double)slots) * (60000.0 / updateInterval);
+void recordPulse(unsigned long pulseDuration) {
+    pulseTimes[pulseIndex] = pulseDuration;
+    pulseIndex = (pulseIndex + 1) % 16;
+}
 
-    // Reset pulse count after calculation
-    pulseCount = 0;
+double calculateSpeed() {
+    // Calculate the average pulse duration
+    unsigned long totalDuration = 0;
+    int validPulses = 0;
+    for (int i = 0; i < 16; i++) {
+        if (pulseTimes[i] != ULONG_MAX) {
+            totalDuration += pulseTimes[i];
+            validPulses++;
+        }
+    }
+
+    if (validPulses == 0) {
+        return 0; // No valid pulses, return 0 RPM
+    }
+
+    double averageDuration = totalDuration / (double)validPulses;
+
+    // Adjust debounce delay based on average pulse duration
+    debounceDelay = averageDuration / 4; // Example: set debounce delay to 1/2 of the average duration
+
+    // Calculate RPM based on the average pulse duration
+    double rpm = (60000.0 / averageDuration) / slots;
 
     if (targetRPM > 0) {
         // If the motor is spinning forward, the RPM should be positive
@@ -198,14 +233,15 @@ double calculateSpeed() {
     return rpm;
 }
 
-int calculatePWM(float measuredSpeed) {  
-    float error = targetRPM - measuredSpeed;  
+int calculatePWM(float measuredSpeed) {
+    float error = targetRPM - measuredSpeed;
     integral += error; // Accumulate the error for the integral term  
-    int pwmValue;  
-    if (targetRPM > 0) {  
-        pwmValue = constrain(Kp * error + Ki * integral, 0, 255);  
-    } else {  
-        pwmValue = constrain(Kp * error + Ki * integral, -255, 0);  
-    }  
-    return pwmValue;  
+    int pwmValue;
+    if (targetRPM > 0) {
+        pwmValue = constrain(Kp * error + Ki * integral, 0, 255);
+    }
+    else {
+        pwmValue = constrain(Kp * error + Ki * integral, -255, 0);
+    }
+    return pwmValue;
 }
