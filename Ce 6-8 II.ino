@@ -2,6 +2,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
 #include <limits.h> // Include for ULONG_MAX
+#include <math.h>   // Include for sin function
 
 // Define the I2C address and reset pin
 Adafruit_SH1107 display(64, 128, &Wire);
@@ -18,11 +19,25 @@ Adafruit_SH1107 display(64, 128, &Wire);
 // Define photointerrupter pin
 #define PHOTO_PIN 34
 
-// Define LED pin
-#define LED_PIN 4
+// Define magnetic switch pin and output switch pin
+#define MAGNETIC_SWITCH_PIN_R 37
+#define BINARY_LED_ENABLE_PIN 8
+
+// Define binary sensor pins
+#define BINARY_PIN_0 36
+#define BINARY_PIN_1 4
+#define BINARY_PIN_2 5
+#define BINARY_PIN_3 19
+#define BINARY_PIN_4 21
+#define BINARY_PIN_5 7
+
+// Define status LED pins
+#define RUN_LED 13
+#define FWD_LED 27
+#define REVERSE_LED 33
 
 // Define PWM frequency and resolution
-#define PWM_FREQUENCY 100
+#define PWM_FREQUENCY 125
 #define PWM_RESOLUTION 8
 
 // Button states
@@ -43,7 +58,8 @@ const double updateInterval = 50;
 const int speedIncrement = 30;
 
 // Encoder settings
-volatile unsigned long pulseTimes[16] = { 0 };
+const int pulseTimesSize = 12;
+volatile unsigned long pulseTimes[pulseTimesSize] = { 0 };
 volatile int pulseIndex = 0;
 unsigned long lastPulseTime = 0;
 const unsigned int slots = 16; // Number of fins in the encoder wheel
@@ -59,6 +75,19 @@ volatile unsigned long debounceDelay = 25; // Initial debounce delay
 
 // Time tracking
 unsigned long lastTime = 0; // Initialize lastTime
+
+// Rotating symbol states
+char rotatingSymbols[] = { '-', '/', '|', '\\' };
+int symbolIndex = 0;
+
+// Adjustable delay for magnetic sensor
+const unsigned long magneticSensorDelay = 25;
+unsigned long magneticSensorLastTime = 0;
+bool magneticSensorTriggered = false;
+
+// Breathing effect variables
+unsigned long lastBreathTime = 0;
+const unsigned long breathInterval = 2000; // 2 seconds for a full breath cycle
 
 void setup() {
     // Initialize serial communication
@@ -91,9 +120,27 @@ void setup() {
     pinMode(PHOTO_PIN, INPUT);
     attachInterrupt(digitalPinToInterrupt(PHOTO_PIN), countPulse, CHANGE);
 
-    // Initialize LED pin
-    pinMode(LED_PIN, OUTPUT);
-    digitalWrite(LED_PIN, LOW);
+    // Initialize magnetic switch pin and output switch pin
+    pinMode(MAGNETIC_SWITCH_PIN_R, INPUT);
+    pinMode(BINARY_LED_ENABLE_PIN, OUTPUT);
+    digitalWrite(BINARY_LED_ENABLE_PIN, HIGH); // Ensure the LED is off initially
+
+    // Initialize binary sensor pins
+    pinMode(BINARY_PIN_0, INPUT);
+    pinMode(BINARY_PIN_1, INPUT);
+    pinMode(BINARY_PIN_2, INPUT);
+    pinMode(BINARY_PIN_3, INPUT);
+    pinMode(BINARY_PIN_4, INPUT);
+    pinMode(BINARY_PIN_5, INPUT);
+
+    // Initialize status LED pins
+    pinMode(RUN_LED, OUTPUT);
+    pinMode(FWD_LED, OUTPUT);
+    pinMode(REVERSE_LED, OUTPUT);
+    digitalWrite(RUN_LED, HIGH); // Turn on the RUN_LED initially
+
+    // Attach REVERSE_LED to PWM
+    ledcAttach(REVERSE_LED, 4000, 8);
 
     // Initialize lastTime
     lastTime = millis();
@@ -101,7 +148,7 @@ void setup() {
     Serial.println("Setup Finished");
 }
 
-void updateDisplay(float measuredSpeed, float targetSpeed, int pwmValue, float error, float integral) {
+void updateDisplay(float measuredSpeed, float targetSpeed, int pwmValue, String binaryString, int binaryNumber) {
     display.clearDisplay();
     display.setCursor(0, 0);
     display.print(F("T: "));
@@ -113,10 +160,18 @@ void updateDisplay(float measuredSpeed, float targetSpeed, int pwmValue, float e
     display.print(F("PWM: "));
     display.print(pwmValue);
     display.println(F(" /255"));
-    display.print(F("Err: "));
-    display.println(error);
-    display.print(F("Int: "));
-    display.print(integral);
+
+    // Display binary sensor values as a string of 0s and 1s
+    display.print(F("Sensors: "));
+    display.print(binaryString);
+    display.print(F(" "));
+    display.println(binaryNumber);
+
+    // Display rotating symbol in the bottom right corner
+    display.setCursor(display.width() - 6, display.height() - 8);
+    display.print(rotatingSymbols[symbolIndex]);
+    symbolIndex = (symbolIndex + 1) % 4;
+
     display.display();
 }
 
@@ -147,39 +202,97 @@ void loop() {
         double actualSpeed = calculateSpeed();
         float error = targetRPM - actualSpeed;
         motorSpeed = calculatePWM(actualSpeed);
-        updateDisplay(actualSpeed, targetRPM, motorSpeed, error, integral);
+
+        // Read binary sensor values
+        String binaryString = "";
+        int binaryNumber = 0;
+        binaryNumber |= digitalRead(BINARY_PIN_0) << 0;
+        binaryNumber |= digitalRead(BINARY_PIN_1) << 1;
+        binaryNumber |= digitalRead(BINARY_PIN_2) << 2;
+        binaryNumber |= digitalRead(BINARY_PIN_3) << 3;
+        binaryNumber |= digitalRead(BINARY_PIN_4) << 4;
+        binaryNumber |= digitalRead(BINARY_PIN_5) << 5;
+        binaryString += String(digitalRead(BINARY_PIN_0));
+        binaryString += String(digitalRead(BINARY_PIN_1));
+        binaryString += String(digitalRead(BINARY_PIN_2));
+        binaryString += String(digitalRead(BINARY_PIN_3));
+        binaryString += String(digitalRead(BINARY_PIN_4));
+        binaryString += String(digitalRead(BINARY_PIN_5));
+
+        updateDisplay(actualSpeed, targetRPM, motorSpeed, binaryString, binaryNumber);
     }
 
-    // Set motor speed
+    // Set motor speed and control direction LEDs
     if (targetRPM == 0) {
         // Stop motor
         ledcWrite(MOTOR_FORWARD, 0);
         ledcWrite(MOTOR_REVERSE, 0);
         motorSpeed = 0;
         integral = 0;
+        digitalWrite(FWD_LED, LOW);
+
+        // Breathing effect for REVERSE_LED
+        unsigned long currentTime = millis();
+        float phase = (currentTime % breathInterval) / (float)breathInterval;
+        int brightness = (sin(phase * 2 * PI) + 1) * 256; // Sine wave from 0 to 255
+        brightness = map(brightness, 0, 255, 0, 64); // Map to 0-25% brightness
+        ledcWrite(REVERSE_LED, brightness);
     }
     else if (targetRPM > 0) {
         // Spin motor forward
         ledcWrite(MOTOR_FORWARD, motorSpeed);
         ledcWrite(MOTOR_REVERSE, 0);
+        digitalWrite(FWD_LED, HIGH);
+        ledcWrite(REVERSE_LED, 0);
     }
     else {
         // Spin motor reverse
         ledcWrite(MOTOR_FORWARD, 0);
         ledcWrite(MOTOR_REVERSE, abs(motorSpeed));
-    }
-
-    // Set LED_PIN based on the state of PHOTO_PIN
-    if (digitalRead(PHOTO_PIN) == HIGH) {
-        digitalWrite(LED_PIN, HIGH);
-    }
-    else {
-        digitalWrite(LED_PIN, LOW);
+        digitalWrite(FWD_LED, LOW);
+        ledcWrite(REVERSE_LED, 255);
     }
 
     // Check if no new pulse is recorded after 250ms
     if (millis() - lastPulseTime > 250) {
         recordPulse(ULONG_MAX); // Use ULONG_MAX to indicate no new pulse
+    }
+
+    // Check magnetic switch state and control LED enable pin
+    if (digitalRead(MAGNETIC_SWITCH_PIN_R) == LOW) {
+        if (!magneticSensorTriggered) {
+            magneticSensorTriggered = true;
+            magneticSensorLastTime = millis();
+        }
+        if (millis() - magneticSensorLastTime >= magneticSensorDelay) {
+            digitalWrite(BINARY_LED_ENABLE_PIN, LOW); // Turn on the LED
+
+            // Read binary sensor values
+            String binaryString = "";
+            int binaryNumber = 0;
+            binaryNumber |= digitalRead(BINARY_PIN_0) << 0;
+            binaryNumber |= digitalRead(BINARY_PIN_1) << 1;
+            binaryNumber |= digitalRead(BINARY_PIN_2) << 2;
+            binaryNumber |= digitalRead(BINARY_PIN_3) << 3;
+            binaryNumber |= digitalRead(BINARY_PIN_4) << 4;
+            binaryNumber |= digitalRead(BINARY_PIN_5) << 5;
+            binaryString += String(digitalRead(BINARY_PIN_0));
+            binaryString += String(digitalRead(BINARY_PIN_1));
+            binaryString += String(digitalRead(BINARY_PIN_2));
+            binaryString += String(digitalRead(BINARY_PIN_3));
+            binaryString += String(digitalRead(BINARY_PIN_4));
+            binaryString += String(digitalRead(BINARY_PIN_5));
+
+            // Update display with new sensor values
+            double actualSpeed = calculateSpeed();
+            float error = targetRPM - actualSpeed;
+            motorSpeed = calculatePWM(actualSpeed);
+            updateDisplay(actualSpeed, targetRPM, motorSpeed, binaryString, binaryNumber);
+        }
+    }
+    else {
+        magneticSensorTriggered = false;
+        digitalWrite(BINARY_LED_ENABLE_PIN, HIGH); // Turn off the LED
     }
 }
 
@@ -195,14 +308,14 @@ void countPulse() {
 
 void recordPulse(unsigned long pulseDuration) {
     pulseTimes[pulseIndex] = pulseDuration;
-    pulseIndex = (pulseIndex + 1) % 16;
+    pulseIndex = (pulseIndex + 1) % pulseTimesSize;
 }
 
 double calculateSpeed() {
     // Calculate the average pulse duration
     unsigned long totalDuration = 0;
     int validPulses = 0;
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < pulseTimesSize; i++) {
         if (pulseTimes[i] != ULONG_MAX) {
             totalDuration += pulseTimes[i];
             validPulses++;
@@ -216,7 +329,7 @@ double calculateSpeed() {
     double averageDuration = totalDuration / (double)validPulses;
 
     // Adjust debounce delay based on average pulse duration
-    debounceDelay = averageDuration / 4; // Example: set debounce delay to 1/2 of the average duration
+    debounceDelay = constrain(averageDuration / 4, 10, 50); // Example: set debounce delay to 1/2 of the average duration
 
     // Calculate RPM based on the average pulse duration
     double rpm = (60000.0 / averageDuration) / slots;
