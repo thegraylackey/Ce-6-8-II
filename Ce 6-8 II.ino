@@ -8,37 +8,37 @@
 Adafruit_SH1107 display(64, 128, &Wire);
 
 // Define button pins
-#define BUTTON_A 15
-#define BUTTON_B 32
-#define BUTTON_C 14
+constexpr int BUTTON_A = 15;
+constexpr int BUTTON_B = 32;
+constexpr int BUTTON_C = 14;
 
 // Define motor control pins
-#define MOTOR_FORWARD 26
-#define MOTOR_REVERSE 25
+constexpr int MOTOR_FORWARD = 26;
+constexpr int MOTOR_REVERSE = 25;
 
 // Define photointerrupter pin
-#define PHOTO_PIN 34
+constexpr int PHOTO_PIN = 34;
 
 // Define magnetic switch pin and output switch pin
-#define MAGNETIC_SWITCH_PIN_R 37
-#define BINARY_LED_ENABLE_PIN 8
+constexpr int MAGNETIC_SWITCH_PIN_R = 37;
+constexpr int BINARY_LED_ENABLE_PIN = 8;
 
 // Define binary sensor pins
-#define BINARY_PIN_0 36
-#define BINARY_PIN_1 4
-#define BINARY_PIN_2 5
-#define BINARY_PIN_3 19
-#define BINARY_PIN_4 21
-#define BINARY_PIN_5 7
+constexpr int BINARY_PIN_0 = 36;
+constexpr int BINARY_PIN_1 = 4;
+constexpr int BINARY_PIN_2 = 5;
+constexpr int BINARY_PIN_3 = 19;
+constexpr int BINARY_PIN_4 = 21;
+constexpr int BINARY_PIN_5 = 7;
 
 // Define status LED pins
-#define RUN_LED 13
-#define FWD_LED 27
-#define REVERSE_LED 33
+constexpr int RUN_LED = 13;
+constexpr int FWD_LED = 27;
+constexpr int REVERSE_LED = 33;
 
 // Define PWM frequency and resolution
-#define PWM_FREQUENCY 125
-#define PWM_RESOLUTION 8
+constexpr int PWM_FREQUENCY = 125;
+constexpr int PWM_RESOLUTION = 8;
 
 // Button states
 int lastButtonStateA = HIGH;
@@ -52,22 +52,22 @@ int buttonStateC = HIGH;
 double motorSpeed = 0;
 
 // Update Interval
-const double updateInterval = 50;
+constexpr double updateInterval = 50;
 
 // Speed increment
-const int speedIncrement = 30;
+constexpr int speedIncrement = 30;
 
 // Encoder settings
-const int pulseTimesSize = 12;
+constexpr int pulseTimesSize = 12;
 volatile unsigned long pulseTimes[pulseTimesSize] = { 0 };
 volatile int pulseIndex = 0;
 unsigned long lastPulseTime = 0;
-const unsigned int slots = 16; // Number of fins in the encoder wheel
+constexpr unsigned int slots = 16; // Number of fins in the encoder wheel
 
 // PI control settings
 float targetRPM = 0.0; // Target RPM
-float Kp = 0.01; // Proportional gain
-float Ki = 0.01; // Integral gain
+constexpr float Kp = 0.01; // Proportional gain
+constexpr float Ki = 0.01; // Integral gain
 float integral = 0.0; // Integral term
 
 // Debounce delay
@@ -77,17 +77,17 @@ volatile unsigned long debounceDelay = 25; // Initial debounce delay
 unsigned long lastTime = 0; // Initialize lastTime
 
 // Rotating symbol states
-char rotatingSymbols[] = { '-', '/', '|', '\\' };
+char rotatingSymbols[] = { '-', '\\', '|', '/' };
 int symbolIndex = 0;
 
 // Adjustable delay for magnetic sensor
-const unsigned long magneticSensorDelay = 25;
+constexpr unsigned long magneticSensorDelay = 25;
 unsigned long magneticSensorLastTime = 0;
 bool magneticSensorTriggered = false;
 
 // Breathing effect variables
 unsigned long lastBreathTime = 0;
-const unsigned long breathInterval = 2000; // 2 seconds for a full breath cycle
+constexpr unsigned long breathInterval = 2000; // 2 seconds for a full breath cycle
 
 void setup() {
     // Initialize serial communication
@@ -148,7 +148,7 @@ void setup() {
     Serial.println("Setup Finished");
 }
 
-void updateDisplay(float measuredSpeed, float targetSpeed, int pwmValue, String binaryString, int binaryNumber) {
+void updateDisplay(float measuredSpeed, float targetSpeed, int pwmValue, const String& binaryString, int binaryNumber) {
     display.clearDisplay();
     display.setCursor(0, 0);
     display.print(F("T: "));
@@ -175,7 +175,7 @@ void updateDisplay(float measuredSpeed, float targetSpeed, int pwmValue, String 
     display.display();
 }
 
-void loop() {
+void readButtonStates() {
     buttonStateA = digitalRead(BUTTON_A);
     buttonStateB = digitalRead(BUTTON_B);
     buttonStateC = digitalRead(BUTTON_C);
@@ -195,6 +195,34 @@ void loop() {
     lastButtonStateA = buttonStateA;
     lastButtonStateB = buttonStateB;
     lastButtonStateC = buttonStateC;
+}
+
+void readBinarySensors(String& binaryString, int& binaryNumber) {
+    binaryNumber = 0;
+    binaryNumber |= digitalRead(BINARY_PIN_0) << 0;
+    binaryNumber |= digitalRead(BINARY_PIN_1) << 1;
+    binaryNumber |= digitalRead(BINARY_PIN_2) << 2;
+    binaryNumber |= digitalRead(BINARY_PIN_3) << 3;
+    binaryNumber |= digitalRead(BINARY_PIN_4) << 4;
+    binaryNumber |= digitalRead(BINARY_PIN_5) << 5;
+    binaryString = String(digitalRead(BINARY_PIN_0)) +
+        String(digitalRead(BINARY_PIN_1)) +
+        String(digitalRead(BINARY_PIN_2)) +
+        String(digitalRead(BINARY_PIN_3)) +
+        String(digitalRead(BINARY_PIN_4)) +
+        String(digitalRead(BINARY_PIN_5));
+}
+
+void handleBreathingEffect() {
+    unsigned long currentTime = millis();
+    float phase = (currentTime % breathInterval) / (float)breathInterval;
+    int brightness = (sin(phase * 2 * PI) + 1) * 255; // Sine wave from 0 to 255
+    brightness = map(brightness, 0, 255, 0, 32); // Map to 0-25% brightness
+    ledcWrite(REVERSE_LED, brightness);
+}
+
+void loop() {
+    readButtonStates();
 
     // Update speed display every updateInterval
     if (millis() - lastTime >= updateInterval) {
@@ -204,20 +232,9 @@ void loop() {
         motorSpeed = calculatePWM(actualSpeed);
 
         // Read binary sensor values
-        String binaryString = "";
-        int binaryNumber = 0;
-        binaryNumber |= digitalRead(BINARY_PIN_0) << 0;
-        binaryNumber |= digitalRead(BINARY_PIN_1) << 1;
-        binaryNumber |= digitalRead(BINARY_PIN_2) << 2;
-        binaryNumber |= digitalRead(BINARY_PIN_3) << 3;
-        binaryNumber |= digitalRead(BINARY_PIN_4) << 4;
-        binaryNumber |= digitalRead(BINARY_PIN_5) << 5;
-        binaryString += String(digitalRead(BINARY_PIN_0));
-        binaryString += String(digitalRead(BINARY_PIN_1));
-        binaryString += String(digitalRead(BINARY_PIN_2));
-        binaryString += String(digitalRead(BINARY_PIN_3));
-        binaryString += String(digitalRead(BINARY_PIN_4));
-        binaryString += String(digitalRead(BINARY_PIN_5));
+        String binaryString;
+        int binaryNumber;
+        readBinarySensors(binaryString, binaryNumber);
 
         updateDisplay(actualSpeed, targetRPM, motorSpeed, binaryString, binaryNumber);
     }
@@ -232,11 +249,7 @@ void loop() {
         digitalWrite(FWD_LED, LOW);
 
         // Breathing effect for REVERSE_LED
-        unsigned long currentTime = millis();
-        float phase = (currentTime % breathInterval) / (float)breathInterval;
-        int brightness = (sin(phase * 2 * PI) + 1) * 256; // Sine wave from 0 to 255
-        brightness = map(brightness, 0, 255, 0, 64); // Map to 0-25% brightness
-        ledcWrite(REVERSE_LED, brightness);
+        handleBreathingEffect();
     }
     else if (targetRPM > 0) {
         // Spin motor forward
@@ -260,28 +273,19 @@ void loop() {
 
     // Check magnetic switch state and control LED enable pin
     if (digitalRead(MAGNETIC_SWITCH_PIN_R) == LOW) {
+        digitalWrite(BINARY_LED_ENABLE_PIN, LOW); // Turn on the LED
+
         if (!magneticSensorTriggered) {
             magneticSensorTriggered = true;
             magneticSensorLastTime = millis();
         }
         if (millis() - magneticSensorLastTime >= magneticSensorDelay) {
-            digitalWrite(BINARY_LED_ENABLE_PIN, LOW); // Turn on the LED
+            
 
             // Read binary sensor values
-            String binaryString = "";
-            int binaryNumber = 0;
-            binaryNumber |= digitalRead(BINARY_PIN_0) << 0;
-            binaryNumber |= digitalRead(BINARY_PIN_1) << 1;
-            binaryNumber |= digitalRead(BINARY_PIN_2) << 2;
-            binaryNumber |= digitalRead(BINARY_PIN_3) << 3;
-            binaryNumber |= digitalRead(BINARY_PIN_4) << 4;
-            binaryNumber |= digitalRead(BINARY_PIN_5) << 5;
-            binaryString += String(digitalRead(BINARY_PIN_0));
-            binaryString += String(digitalRead(BINARY_PIN_1));
-            binaryString += String(digitalRead(BINARY_PIN_2));
-            binaryString += String(digitalRead(BINARY_PIN_3));
-            binaryString += String(digitalRead(BINARY_PIN_4));
-            binaryString += String(digitalRead(BINARY_PIN_5));
+            String binaryString;
+            int binaryNumber;
+            readBinarySensors(binaryString, binaryNumber);
 
             // Update display with new sensor values
             double actualSpeed = calculateSpeed();
