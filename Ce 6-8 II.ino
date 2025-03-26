@@ -3,6 +3,7 @@
 #include <Adafruit_SH110X.h>
 #include <limits.h> // Include for ULONG_MAX
 #include <math.h>   // Include for sin function
+#include <map>      // Include for std::map
 
 // Define the I2C address and reset pin
 Adafruit_SH1107 display(64, 128, &Wire);
@@ -17,8 +18,17 @@ constexpr int MOTOR_FORWARD = 26;
 constexpr int MOTOR_REVERSE = 25;
 
 // Define photointerrupter pins
-constexpr int MOTOR_RPM_PIN = 34;
-constexpr int WHEEL_RPM_PIN = 39; 
+constexpr int DRIVE_RPM_PIN = 34;
+constexpr int UNDRIVEN_RPM_PIN = 39;
+
+// Define wheel diameters in mm
+constexpr double DRIVEN_WHEEL_DIAMETER = 30.5;
+constexpr double UNDRIVEN_WHEEL_DIAMETER = 21.6;
+constexpr double GEAR_RATIO = 0.0889;
+
+// Precompute conversion factors
+constexpr double DRIVEN_WHEEL_CONVERSION = (PI * DRIVEN_WHEEL_DIAMETER) / 60.0 * GEAR_RATIO;
+constexpr double UNDRIVEN_WHEEL_CONVERSION = (PI * UNDRIVEN_WHEEL_DIAMETER) / 60.0;
 
 // Define magnetic switch pin and output switch pin
 constexpr int TRACK_CODE_MAGNET_PIN_R = 37;
@@ -38,7 +48,7 @@ constexpr int FWD_LED = 27;
 constexpr int REVERSE_LED = 13;
 
 // Define PWM frequency and resolution
-constexpr int PWM_FREQUENCY = 150;
+constexpr int PWM_FREQUENCY = 200;
 constexpr int PWM_RESOLUTION = 8;
 
 // Button states
@@ -56,27 +66,27 @@ double motorSpeed = 0;
 constexpr double updateInterval = 20;
 
 // Speed increment
-constexpr int speedIncrement = 30;
+constexpr int speedIncrement = 25;
 
 // Encoder settings
 constexpr int pulseTimesSize1 = 3;
 constexpr int pulseTimesSize2 = 20;
-    
-    // Main driven wheel or motor encoder
-    volatile unsigned long pulseTimes[pulseTimesSize1] = { 0 };
-    volatile int pulseIndex = 0;
-    unsigned long lastPulseTime = 0;
-    constexpr unsigned int slots = 4;
 
-    // Un-driven wheel encoder
-    volatile unsigned long pulseTimes2[pulseTimesSize2] = { 0 };
-    volatile int pulseIndex2 = 0;
-    unsigned long lastPulseTime2 = 0;
-    constexpr unsigned int slots2 = 10;
+// Main driven wheel or motor encoder
+volatile unsigned long pulseTimes[pulseTimesSize1] = { 0 };
+volatile int pulseIndex = 0;
+unsigned long lastPulseTime = 0;
+constexpr unsigned int slots = 4;
+
+// Un-driven wheel encoder
+volatile unsigned long pulseTimes2[pulseTimesSize2] = { 0 };
+volatile int pulseIndex2 = 0;
+unsigned long lastPulseTime2 = 0;
+constexpr unsigned int slots2 = 10;
 
 // PI control settings
-float targetRPM = 0.0; // Target RPM
-constexpr float Kp = 0.2; // Proportional gain
+float targetSpeed = 0.0; // Target speed in mm/s
+constexpr float Kp = 0.1; // Proportional gain
 constexpr float Ki = 0.02; // Integral gain
 float integral = 0.0; // Integral term
 
@@ -117,13 +127,14 @@ void setup() {
     ledcAttach(MOTOR_FORWARD, PWM_FREQUENCY, PWM_RESOLUTION);
     ledcAttach(MOTOR_REVERSE, PWM_FREQUENCY, PWM_RESOLUTION);
 
-    pinMode(MOTOR_RPM_PIN, INPUT);
-    attachInterrupt(digitalPinToInterrupt(MOTOR_RPM_PIN), countPulse, CHANGE);
+    pinMode(DRIVE_RPM_PIN, INPUT);
+    attachInterrupt(digitalPinToInterrupt(DRIVE_RPM_PIN), countPulse, CHANGE);
 
-    pinMode(WHEEL_RPM_PIN, INPUT);
-    attachInterrupt(digitalPinToInterrupt(WHEEL_RPM_PIN), countPulse2, CHANGE);
+    pinMode(UNDRIVEN_RPM_PIN, INPUT);
+    attachInterrupt(digitalPinToInterrupt(UNDRIVEN_RPM_PIN), countPulse2, CHANGE);
 
     pinMode(TRACK_CODE_MAGNET_PIN_R, INPUT);
+    pinMode(TRACK_CODE_MAGNET_PIN_L, INPUT);
     pinMode(TRACK_CODE_IR_LED_PIN, OUTPUT);
     digitalWrite(TRACK_CODE_IR_LED_PIN, HIGH);
 
@@ -148,16 +159,16 @@ void updateDisplay(float measuredSpeed, float measuredSpeed2, float targetSpeed,
     display.setCursor(0, 0);
     display.print(F("T: "));
     display.print(targetSpeed);
-    display.println(F(" RPM"));
+    display.println(F(" mm/s"));
 
     display.print(F("M: "));
     display.print(measuredSpeed);
-    display.println(F(" RPM"));
+    display.println(F(" mm/s"));
 
     // Show second sensor speed
     display.print(F("U: "));
     display.print(measuredSpeed2);
-    display.println(F(" RPM"));
+    display.println(F(" mm/s"));
 
     display.print(F("PWM: "));
     display.print(pwmValue);
@@ -181,14 +192,28 @@ void readButtonStates() {
     buttonStateB = digitalRead(BUTTON_B);
     buttonStateC = digitalRead(BUTTON_C);
 
+    static unsigned long lastButtonBPressTime = 0;
+    static bool buttonBPressedOnce = false;
+
     if (buttonStateA == LOW && lastButtonStateA == HIGH) {
-        targetRPM += speedIncrement;
+        targetSpeed += speedIncrement;
     }
     if (buttonStateB == LOW && lastButtonStateB == HIGH) {
-        targetRPM = 0;
+        unsigned long currentTime = millis();
+        if (buttonBPressedOnce && (currentTime - lastButtonBPressTime) < 500) {
+            // Toggle direction if Button B is pressed twice within 500ms
+            targetSpeed = -targetSpeed; // Adjust targetSpeed based on direction
+            buttonBPressedOnce = false;
+        }
+        else {
+            // Stop the motor if Button B is pressed once
+            targetSpeed = 0;
+            buttonBPressedOnce = true;
+            lastButtonBPressTime = currentTime;
+        }
     }
     if (buttonStateC == LOW && lastButtonStateC == HIGH) {
-        targetRPM -= speedIncrement;
+        targetSpeed -= speedIncrement;
     }
 
     lastButtonStateA = buttonStateA;
@@ -220,6 +245,28 @@ void handleBreathingEffect() {
     ledcWrite(REVERSE_LED, brightness);
 }
 
+void handleTrackCode(int code) {
+    switch (code) {
+    case 61:
+        targetSpeed = 50;
+        break;
+    case 62:
+        targetSpeed = -50;
+        break;
+    case 63:
+        targetSpeed = (targetSpeed > 0) ? -100 : 100;
+        break;
+    default:
+        Serial.print("Unknown track code detected: ");
+        Serial.println(code);
+        return;
+    }
+    Serial.print("Track code detected: ");
+    Serial.print(code);
+    Serial.print(", setting target speed to: ");
+    Serial.println(targetSpeed);
+}
+
 void loop() {
     readButtonStates();
 
@@ -233,11 +280,11 @@ void loop() {
         int binaryNumber;
         readBinarySensors(binaryString, binaryNumber);
 
-        updateDisplay(actualSpeed, actualSpeed2, targetRPM, static_cast<int>(motorSpeed), binaryString, binaryNumber);
+        updateDisplay(actualSpeed, actualSpeed2, targetSpeed, static_cast<int>(motorSpeed), binaryString, binaryNumber);
 
     }
 
-    if (targetRPM == 0) {
+    if (targetSpeed == 0) {
         ledcWrite(MOTOR_FORWARD, 0);
         ledcWrite(MOTOR_REVERSE, 0);
         motorSpeed = 0;
@@ -245,7 +292,7 @@ void loop() {
         digitalWrite(FWD_LED, LOW);
         handleBreathingEffect();
     }
-    else if (targetRPM > 0) {
+    else if (targetSpeed > 0) {
         ledcWrite(MOTOR_FORWARD, motorSpeed);
         ledcWrite(MOTOR_REVERSE, 0);
         digitalWrite(FWD_LED, HIGH);
@@ -258,38 +305,66 @@ void loop() {
         ledcWrite(REVERSE_LED, 255);
     }
 
-    // Check if no new pulse is recorded after 50ms for both sensors
+    // Check if no new pulse is recorded
     if (millis() - lastPulseTime > 50) {
         recordPulse(ULONG_MAX);
     }
-    if (millis() - lastPulseTime2 > 50) {
+    if (millis() - lastPulseTime2 > 100) {
         recordPulse2(ULONG_MAX);
     }
 
-    // Check magnetic switch
-    if (digitalRead(TRACK_CODE_MAGNET_PIN_R) == LOW) {
-        digitalWrite(TRACK_CODE_IR_LED_PIN, LOW);
-        if (!magneticSensorTriggered) {
-            magneticSensorTriggered = true;
-            magneticSensorLastTime = millis();
-        }
-        if (millis() - magneticSensorLastTime >= magneticSensorDelay) {
-            String binaryString;
-            int binaryNumber;
-            readBinarySensors(binaryString, binaryNumber);
+    // Check magnetic switch based on direction of motion
+    if (targetSpeed > 0) { // Moving forward
+        if (digitalRead(TRACK_CODE_MAGNET_PIN_R) == LOW) {
+            digitalWrite(TRACK_CODE_IR_LED_PIN, LOW);
+            if (!magneticSensorTriggered) {
+                magneticSensorTriggered = true;
+                magneticSensorLastTime = millis();
+            }
+            if (millis() - magneticSensorLastTime >= magneticSensorDelay) {
+                String binaryString;
+                int binaryNumber;
+                readBinarySensors(binaryString, binaryNumber);
 
-            double actualSpeed = calculateSpeed();
-            double actualSpeed2 = calculateSpeed2();
-            motorSpeed = calculatePWM(actualSpeed);
-            updateDisplay(actualSpeed, actualSpeed2, targetRPM, static_cast<int>(motorSpeed), binaryString, binaryNumber);
+                handleTrackCode(binaryNumber); // Handle the detected track code
+
+                double actualSpeed = calculateSpeed();
+                double actualSpeed2 = calculateSpeed2();
+                motorSpeed = calculatePWM(actualSpeed);
+                updateDisplay(actualSpeed, actualSpeed2, targetSpeed, static_cast<int>(motorSpeed), binaryString, binaryNumber);
+            }
+        }
+        else {
+            magneticSensorTriggered = false;
+            digitalWrite(TRACK_CODE_IR_LED_PIN, HIGH);
         }
     }
-    else {
-        magneticSensorTriggered = false;
-        digitalWrite(TRACK_CODE_IR_LED_PIN, HIGH);
+    else { // Moving backward
+        if (digitalRead(TRACK_CODE_MAGNET_PIN_L) == LOW) {
+            digitalWrite(TRACK_CODE_IR_LED_PIN, LOW);
+            if (!magneticSensorTriggered) {
+                magneticSensorTriggered = true;
+                magneticSensorLastTime = millis();
+            }
+            if (millis() - magneticSensorLastTime >= magneticSensorDelay) {
+                String binaryString;
+                int binaryNumber;
+                readBinarySensors(binaryString, binaryNumber);
+
+                handleTrackCode(binaryNumber); // Handle the detected track code
+
+                double actualSpeed = calculateSpeed();
+                double actualSpeed2 = calculateSpeed2();
+                motorSpeed = calculatePWM(actualSpeed);
+                updateDisplay(actualSpeed, actualSpeed2, targetSpeed, static_cast<int>(motorSpeed), binaryString, binaryNumber);
+            }
+        }
+        else {
+            magneticSensorTriggered = false;
+            digitalWrite(TRACK_CODE_IR_LED_PIN, HIGH);
+        }
     }
 }
-
 
 // Interrupt for main encoder
 void countPulse() {
@@ -318,7 +393,7 @@ void recordPulse2(unsigned long pulseDuration) {
     pulseIndex2 = (pulseIndex2 + 1) % pulseTimesSize2;
 }
 
-// Calculate speed for main encoder
+// Calculate speed for main encoder in mm/s
 double calculateSpeed() {
     unsigned long totalDuration = 0;
     int validPulses = 0;
@@ -335,11 +410,12 @@ double calculateSpeed() {
     if (averageDuration == 0) {
         return 0;
     }
-    double rpm = (60000.0 / averageDuration) / slots * 0.0889;
-    return (targetRPM > 0) ? abs(rpm) : (targetRPM < 0 ? -abs(rpm) : 0);
+    double rpm = (60000.0 / averageDuration) / slots;
+    double linearSpeed = rpm * DRIVEN_WHEEL_CONVERSION;
+    return (targetSpeed > 0) ? abs(linearSpeed) : (targetSpeed < 0 ? -abs(linearSpeed) : 0);
 }
 
-// Calculate speed for second sensor
+// Calculate speed for second sensor in mm/s
 double calculateSpeed2() {
     unsigned long totalDuration = 0;
     int validPulses = 0;
@@ -357,15 +433,16 @@ double calculateSpeed2() {
         return 0;
     }
     double rpm = (60000.0 / averageDuration) / slots2;
-    return rpm; 
+    double linearSpeed = rpm * UNDRIVEN_WHEEL_CONVERSION;
+    return linearSpeed;
 }
 
 // Calculate PWM based on main encoder speed
 int calculatePWM(float measuredSpeed) {
-    float error = targetRPM - measuredSpeed;
+    float error = targetSpeed - measuredSpeed;
     integral += error;
     int pwmValue;
-    if (targetRPM > 0) {
+    if (targetSpeed > 0) {
         pwmValue = constrain(Kp * error + Ki * integral, 0, 255);
     }
     else {
