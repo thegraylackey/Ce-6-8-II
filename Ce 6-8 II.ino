@@ -55,8 +55,8 @@ float ws_wheelSpeed = 0.0; // Motor Speed (measured motor speed mm/s)
 float ms_motorSpeed = 0.0;  // Wheel Speed (measured wheel speed mm/s)
 
 // PID parameters
-float Kp = 0.5;
-float Ki = 0.05;
+float Kp = 1.0;
+float Ki = 0.1;
 float Kd = 0.1;
 float integral = 0.0;
 float derivative = 0.0;
@@ -71,11 +71,8 @@ constexpr int PCNT_L_LIM = -32768;
 //Wheel Slip
 int slipThreshold = 50;
 int slipCounter = 0;
-int speedDeadband = 10;
+int speedDeadband = 25;
 bool slipDetected = false;
-
-
-
 
 void setupPCNT(pcnt_unit_t unit, int pulsePin) {
 	pcnt_config_t pcntConfig;
@@ -106,8 +103,17 @@ void setupPCNT(pcnt_unit_t unit, int pulsePin) {
 // System Control Parameters
 // **********************************
 
+// Time tracking
 constexpr int DisplayUpdateInterval = 100;
+unsigned long lastDisplayUpdateTime = 0;
+
 constexpr int ControlUpdateInterval = 20;
+unsigned long lastControlUpdateTime = 0;
+
+constexpr int TrackCodeReadInterval = 1;
+unsigned long lastTrackCodeReadTime = 0;
+
+unsigned long lastSetPointUpdate = 0;
 
 // Button states
 int lastButtonStateA = HIGH;
@@ -117,11 +123,6 @@ int buttonStateA = HIGH;
 int buttonStateB = HIGH;
 int buttonStateC = HIGH;
 
-// Time tracking
-unsigned long lastDisplayUpdateTime = 0;
-unsigned long lastControlUpdateTime = 0;
-unsigned long lastSetPointUpdate = 0;
-
 // Display
 Adafruit_SH1107 display(64, 128, &Wire);
 char rotatingSymbols[] = { '-', '\\', '|', '/' };
@@ -129,9 +130,16 @@ int symbolIndex = 0;
 bool magneticSensorTriggered = false;
 unsigned long lastBreathTime = 0;
 constexpr unsigned long breathInterval = 2000;
+
+// Track code
 bool trackCodeSwitchEnabled = true;
-bool magnetLatchR = false; 
-bool magnetLatchL = false; 
+bool magnetLatchR = false;
+bool magnetLatchL = false;
+constexpr int MAX_TRACK_CODES = 256;
+int trackCodeArray[MAX_TRACK_CODES];
+int trackCodeIndex = 0;
+constexpr int MIDDLE_PERCENT = 50; // Use the middle 50% of the array
+
 
 String binaryString;
 int binaryNumber;
@@ -207,29 +215,150 @@ void loop() {
 
 	unsigned long now = millis();
 
-	// Check magnetic switches with latching logic
-	if (digitalRead(TRACK_CODE_MAGNET_PIN_R) == LOW && !magnetLatchR && cs_cmdSpeed >= 0) {
-		magnetLatchR = true;
-		digitalWrite(TRACK_CODE_IR_LED_PIN, LOW);
-		delay(2);
-		readBinarySensors();
-		handleTrackCode(binaryNumber);
-		digitalWrite(TRACK_CODE_IR_LED_PIN, HIGH);
-	}
-	else if (digitalRead(TRACK_CODE_MAGNET_PIN_R) == HIGH) {
-		magnetLatchR = false;
-	}
+	// Update Track Code
+	if (now - lastTrackCodeReadTime >= TrackCodeReadInterval) {
+		lastTrackCodeReadTime = now;
 
-	if (digitalRead(TRACK_CODE_MAGNET_PIN_L) == LOW && !magnetLatchL && cs_cmdSpeed <= 0) {
-		magnetLatchL = true;
-		digitalWrite(TRACK_CODE_IR_LED_PIN, LOW);
-		delay(2);
-		readBinarySensors();
-		handleTrackCode(binaryNumber);
-		digitalWrite(TRACK_CODE_IR_LED_PIN, HIGH);
-	}
-	else if (digitalRead(TRACK_CODE_MAGNET_PIN_L) == HIGH) {
-		magnetLatchL = false;
+		if (digitalRead(TRACK_CODE_MAGNET_PIN_R) == LOW && cs_cmdSpeed >= 0) {
+
+			digitalWrite(TRACK_CODE_IR_LED_PIN, LOW);
+
+			if (!magnetLatchR) {
+				magnetLatchR = true;
+				trackCodeIndex = 0;
+			}
+
+			// Read and store binary numbers while the magnet is low
+			if (trackCodeIndex < MAX_TRACK_CODES) {
+				readBinarySensors();
+				trackCodeArray[trackCodeIndex++] = binaryNumber;
+				Serial.print(binaryNumber);
+
+			}
+		}
+
+		else if (magnetLatchR) {
+			// Magnet just went high, calculate the mode
+			digitalWrite(TRACK_CODE_IR_LED_PIN, HIGH);
+			magnetLatchR = false;
+
+			// Check if the array contains any non-zero values
+			bool hasNonZero = false;
+			for (int i = 0; i < trackCodeIndex; i++) {
+				if (trackCodeArray[i] != 0) {
+					hasNonZero = true;
+					break;
+				}
+			}
+
+			// Filter out zeros if the array is not all zeros
+			std::vector<int> filteredArray;
+			if (hasNonZero) {
+				for (int i = 0; i < trackCodeIndex; i++) {
+					if (trackCodeArray[i] != 0) {
+						filteredArray.push_back(trackCodeArray[i]);
+					}
+				}
+			}
+			else {
+				// If all values are zero, use the original array
+				filteredArray.assign(trackCodeArray, trackCodeArray + trackCodeIndex);
+			}
+
+			// Determine the middle x% range
+			int middleStart = filteredArray.size() * (1.0 - MIDDLE_PERCENT / 100.0) / 2;
+			int middleEnd = filteredArray.size() - middleStart;
+
+			// Calculate the mode of the middle portion
+			std::map<int, int> frequencyMap;
+			for (int i = middleStart; i < middleEnd; i++) {
+				frequencyMap[filteredArray[i]]++;
+			}
+
+			int modeCode = 0;
+			int maxFrequency = 0;
+			for (const auto& entry : frequencyMap) {
+				if (entry.second > maxFrequency) {
+					maxFrequency = entry.second;
+					modeCode = entry.first;
+				}
+			}
+
+			// Pass the mode to handleTrackCode
+			handleTrackCode(modeCode);
+		}
+
+
+
+		// Handle left magnetic switch
+		if (digitalRead(TRACK_CODE_MAGNET_PIN_L) == LOW && cs_cmdSpeed <= 0) {
+
+			digitalWrite(TRACK_CODE_IR_LED_PIN, LOW);
+
+			if (!magnetLatchL) {
+				magnetLatchL = true;
+				trackCodeIndex = 0;
+			}
+
+			// Read and store binary numbers while the magnet is low
+			if (trackCodeIndex < MAX_TRACK_CODES) {
+				readBinarySensors();
+				trackCodeArray[trackCodeIndex++] = binaryNumber;
+				Serial.print(binaryNumber);
+			}
+		}
+
+		else if (magnetLatchL) {
+			// Magnet just went high, calculate the mode
+			digitalWrite(TRACK_CODE_IR_LED_PIN, HIGH);
+			magnetLatchL = false;
+
+			// Check if the array contains any non-zero values
+			bool hasNonZero = false;
+			for (int i = 0; i < trackCodeIndex; i++) {
+				if (trackCodeArray[i] != 0) {
+					hasNonZero = true;
+					break;
+				}
+			}
+
+			// Filter out zeros if the array is not all zeros
+			std::vector<int> filteredArray;
+			if (hasNonZero) {
+				for (int i = 0; i < trackCodeIndex; i++) {
+					if (trackCodeArray[i] != 0) {
+						filteredArray.push_back(trackCodeArray[i]);
+					}
+				}
+			}
+			else {
+				// If all values are zero, use the original array
+				filteredArray.assign(trackCodeArray, trackCodeArray + trackCodeIndex);
+			}
+
+			// Determine the middle x% range
+			int middleStart = filteredArray.size() * (1.0 - MIDDLE_PERCENT / 100.0) / 2;
+			int middleEnd = filteredArray.size() - middleStart;
+
+			// Calculate the mode of the middle portion
+			std::map<int, int> frequencyMap;
+			for (int i = middleStart; i < middleEnd; i++) {
+				frequencyMap[filteredArray[i]]++;
+			}
+
+			int modeCode = 0;
+			int maxFrequency = 0;
+			for (const auto& entry : frequencyMap) {
+				if (entry.second > maxFrequency) {
+					maxFrequency = entry.second;
+					modeCode = entry.first;
+				}
+			}
+
+			// Pass the mode to handleTrackCode
+			handleTrackCode(modeCode);
+		}
+
 	}
 
 	// Update control logic
@@ -393,7 +522,7 @@ void updateDisplay(float measuredSpeed, float measuredSpeed2, float targetSpeed,
 	if (slipDetected) {
 		display.print(F("SLIP"));
 	}
-	
+
 
 	// Display binary string in 2x3 grid at the top right
 	int startX = display.width() - 18;
@@ -462,7 +591,7 @@ void handleBreathingEffect() {
 
 void handleTrackCode(int code) {
 
-	Serial.println(code);
+    Serial.println(String("-") + code);
 
 	// Check if track code switch is enabled and run away
 	if (!trackCodeSwitchEnabled) {
