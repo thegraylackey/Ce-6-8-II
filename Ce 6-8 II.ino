@@ -104,7 +104,7 @@ void setupPCNT(pcnt_unit_t unit, int pulsePin) {
 // **********************************
 
 // Time tracking
-constexpr int DisplayUpdateInterval = 100;
+constexpr int DisplayUpdateInterval = 200;
 unsigned long lastDisplayUpdateTime = 0;
 
 constexpr int ControlUpdateInterval = 20;
@@ -138,8 +138,6 @@ bool magnetLatchL = false;
 constexpr int MAX_TRACK_CODES = 256;
 int trackCodeArray[MAX_TRACK_CODES];
 int trackCodeIndex = 0;
-constexpr int MIDDLE_PERCENT = 50; // Use the middle 50% of the array
-
 
 String binaryString;
 int binaryNumber;
@@ -211,225 +209,210 @@ void setup() {
 // **********************************
 
 void loop() {
+
 	readButtonStates();
 
 	unsigned long now = millis();
 
-	// Update Track Code
+	// Update track code logic
 	if (now - lastTrackCodeReadTime >= TrackCodeReadInterval) {
 		lastTrackCodeReadTime = now;
-
-		if (digitalRead(TRACK_CODE_MAGNET_PIN_R) == LOW && cs_cmdSpeed >= 0) {
-
-			digitalWrite(TRACK_CODE_IR_LED_PIN, LOW);
-
-			if (!magnetLatchR) {
-				magnetLatchR = true;
-				trackCodeIndex = 0;
-			}
-
-			// Read and store binary numbers while the magnet is low
-			if (trackCodeIndex < MAX_TRACK_CODES) {
-				readBinarySensors();
-				trackCodeArray[trackCodeIndex++] = binaryNumber;
-				Serial.print(binaryNumber);
-
-			}
-		}
-
-		else if (magnetLatchR) {
-			// Magnet just went high, calculate the mode
-			digitalWrite(TRACK_CODE_IR_LED_PIN, HIGH);
-			magnetLatchR = false;
-
-			// Check if the array contains any non-zero values
-			bool hasNonZero = false;
-			for (int i = 0; i < trackCodeIndex; i++) {
-				if (trackCodeArray[i] != 0) {
-					hasNonZero = true;
-					break;
-				}
-			}
-
-			// Filter out zeros if the array is not all zeros
-			std::vector<int> filteredArray;
-			if (hasNonZero) {
-				for (int i = 0; i < trackCodeIndex; i++) {
-					if (trackCodeArray[i] != 0) {
-						filteredArray.push_back(trackCodeArray[i]);
-					}
-				}
-			}
-			else {
-				// If all values are zero, use the original array
-				filteredArray.assign(trackCodeArray, trackCodeArray + trackCodeIndex);
-			}
-
-			// Determine the middle x% range
-			int middleStart = filteredArray.size() * (1.0 - MIDDLE_PERCENT / 100.0) / 2;
-			int middleEnd = filteredArray.size() - middleStart;
-
-			// Calculate the mode of the middle portion
-			std::map<int, int> frequencyMap;
-			for (int i = middleStart; i < middleEnd; i++) {
-				frequencyMap[filteredArray[i]]++;
-			}
-
-			int modeCode = 0;
-			int maxFrequency = 0;
-			for (const auto& entry : frequencyMap) {
-				if (entry.second > maxFrequency) {
-					maxFrequency = entry.second;
-					modeCode = entry.first;
-				}
-			}
-
-			// Pass the mode to handleTrackCode
-			handleTrackCode(modeCode);
-		}
-
-
-
-		// Handle left magnetic switch
-		if (digitalRead(TRACK_CODE_MAGNET_PIN_L) == LOW && cs_cmdSpeed <= 0) {
-
-			digitalWrite(TRACK_CODE_IR_LED_PIN, LOW);
-
-			if (!magnetLatchL) {
-				magnetLatchL = true;
-				trackCodeIndex = 0;
-			}
-
-			// Read and store binary numbers while the magnet is low
-			if (trackCodeIndex < MAX_TRACK_CODES) {
-				readBinarySensors();
-				trackCodeArray[trackCodeIndex++] = binaryNumber;
-				Serial.print(binaryNumber);
-			}
-		}
-
-		else if (magnetLatchL) {
-			// Magnet just went high, calculate the mode
-			digitalWrite(TRACK_CODE_IR_LED_PIN, HIGH);
-			magnetLatchL = false;
-
-			// Check if the array contains any non-zero values
-			bool hasNonZero = false;
-			for (int i = 0; i < trackCodeIndex; i++) {
-				if (trackCodeArray[i] != 0) {
-					hasNonZero = true;
-					break;
-				}
-			}
-
-			// Filter out zeros if the array is not all zeros
-			std::vector<int> filteredArray;
-			if (hasNonZero) {
-				for (int i = 0; i < trackCodeIndex; i++) {
-					if (trackCodeArray[i] != 0) {
-						filteredArray.push_back(trackCodeArray[i]);
-					}
-				}
-			}
-			else {
-				// If all values are zero, use the original array
-				filteredArray.assign(trackCodeArray, trackCodeArray + trackCodeIndex);
-			}
-
-			// Determine the middle x% range
-			int middleStart = filteredArray.size() * (1.0 - MIDDLE_PERCENT / 100.0) / 2;
-			int middleEnd = filteredArray.size() - middleStart;
-
-			// Calculate the mode of the middle portion
-			std::map<int, int> frequencyMap;
-			for (int i = middleStart; i < middleEnd; i++) {
-				frequencyMap[filteredArray[i]]++;
-			}
-
-			int modeCode = 0;
-			int maxFrequency = 0;
-			for (const auto& entry : frequencyMap) {
-				if (entry.second > maxFrequency) {
-					maxFrequency = entry.second;
-					modeCode = entry.first;
-				}
-			}
-
-			// Pass the mode to handleTrackCode
-			handleTrackCode(modeCode);
-		}
-
+		updateTrackCode();
 	}
 
 	// Update control logic
 	if (now - lastControlUpdateTime >= ControlUpdateInterval) {
 		lastControlUpdateTime = now;
-
-		// Update sp from cs using acceleration
-		float dt = (now - lastSetPointUpdate) / 1000.0f;
-		lastSetPointUpdate = now;
-
-		updateSetPoint(dt);
-
-		// Read encoder values
-		ms_motorSpeed = calculateMotorSpeed();
-		ws_wheelSpeed = calculateWheelSpeed();
-
-		// Detect wheel slip
-		float speedDifference = fabs(ws_wheelSpeed - ms_motorSpeed);
-
-		// Avoid division by zero
-		float percentageDifference = (ms_motorSpeed != 0) ? (speedDifference / fabs(ms_motorSpeed)) * 100.0 : 0.0;
-
-		if (fabs(ms_motorSpeed) < speedDeadband && fabs(ws_wheelSpeed) < speedDeadband) {
-			// Speeds are too small to detect slip
-			slipDetected = false;
-			slipCounter = 0;
-		}
-		else if (percentageDifference >= slipThreshold) {
-			slipDetected = true;
-			slipCounter++;
-		}
-		else {
-			slipDetected = false;
-			slipCounter = 0;
-		}
-
-		// PID control
-		pwmValue = calculatePWM(ms_motorSpeed);
-
-		// Update PWM output
-		if (ss_setSpeed == 0) {
-			ledcWrite(MOTOR_FORWARD, 0);
-			ledcWrite(MOTOR_REVERSE, 0);
-			digitalWrite(FWD_LED, LOW);
-			handleBreathingEffect();
-		}
-		else if (ss_setSpeed > 0) {
-			ledcWrite(MOTOR_FORWARD, pwmValue);
-			ledcWrite(MOTOR_REVERSE, 0);
-			digitalWrite(FWD_LED, HIGH);
-			ledcWrite(REVERSE_LED, 0);
-		}
-		else { // sp < 0
-			ledcWrite(MOTOR_FORWARD, 0);
-			ledcWrite(MOTOR_REVERSE, abs(pwmValue));
-			digitalWrite(FWD_LED, LOW);
-			ledcWrite(REVERSE_LED, 255);
-		}
+		updateControlLogic(now);
 	}
 
-	// Update display
+	// Update display logic directly
 	if (now - lastDisplayUpdateTime >= DisplayUpdateInterval) {
 		lastDisplayUpdateTime = now;
-
 		updateDisplay(ms_motorSpeed, ws_wheelSpeed, ss_setSpeed, pwmValue, binaryString, binaryNumber);
 	}
+
 }
+
 
 // **********************************
 // Subroutines
 // **********************************
+
+void updateTrackCode() {
+	// Process right magnetic switch
+	if (digitalRead(TRACK_CODE_MAGNET_PIN_R) == LOW && cs_cmdSpeed >= 0) {
+		processMagneticSwitch(magnetLatchR, TRACK_CODE_MAGNET_PIN_R);
+	}
+	else if (magnetLatchR) {
+		processMagneticSwitchEnd(magnetLatchR);
+	}
+
+	// Process left magnetic switch
+	if (digitalRead(TRACK_CODE_MAGNET_PIN_L) == LOW && cs_cmdSpeed <= 0) {
+		processMagneticSwitch(magnetLatchL, TRACK_CODE_MAGNET_PIN_L);
+	}
+	else if (magnetLatchL) {
+		processMagneticSwitchEnd(magnetLatchL);
+	}
+}
+
+void processMagneticSwitch(bool& magnetLatch, int magnetPin) {
+	digitalWrite(TRACK_CODE_IR_LED_PIN, LOW);
+
+	if (!magnetLatch) {
+		magnetLatch = true;
+		trackCodeIndex = 0;
+	}
+
+	// Read and store binary numbers while the magnet is low
+	if (trackCodeIndex < MAX_TRACK_CODES) {
+		readBinarySensors();
+		trackCodeArray[trackCodeIndex++] = binaryNumber;
+		Serial.print(binaryNumber);
+	}
+}
+
+void processMagneticSwitchEnd(bool& magnetLatch) {
+	digitalWrite(TRACK_CODE_IR_LED_PIN, HIGH);
+	magnetLatch = false;
+
+	Serial.println("\n--- Filtering Process Start ---");
+
+	// Step 1: Log the original array
+	Serial.print("Original Array: ");
+	for (int i = 0; i < trackCodeIndex; i++) {
+		Serial.print(trackCodeArray[i]);
+		Serial.print(" ");
+	}
+	Serial.println();
+
+	// Step 2: Trim the array based on the trim percentage
+	constexpr int TRIM_PERCENTAGE = 50; // Adjust this value as needed (0-100)
+	int trimSize = std::max(1, static_cast<int>(trackCodeIndex * (TRIM_PERCENTAGE / 100.0))); // Ensure trimSize is at least 1
+	int middleIndex = trackCodeIndex / 2;
+	int startIndex = std::max(0, middleIndex - trimSize / 2);
+	int endIndex = std::min(trackCodeIndex, startIndex + trimSize);
+
+	// Extract the trimmed array
+	std::vector<int> trimmedArray(trackCodeArray + startIndex, trackCodeArray + endIndex);
+	Serial.print("Trimmed Array (Center Portion, ");
+	Serial.print(TRIM_PERCENTAGE);
+	Serial.println("%):");
+	for (int value : trimmedArray) {
+		Serial.print(value);
+		Serial.print(" ");
+	}
+	Serial.println();
+
+	// Step 3: Check if the array is all zeros
+	bool allZeros = std::all_of(trimmedArray.begin(), trimmedArray.end(), [](int value) { return value == 0; });
+
+	// Step 4: Filter out zeros if the array is not all zeros
+	std::vector<int> filteredArray;
+	if (allZeros) {
+		Serial.println("Array is all zeros. Skipping zero filtering.");
+		filteredArray = trimmedArray; // Keep the array as is
+	}
+	else {
+		for (int value : trimmedArray) {
+			if (value != 0) {
+				filteredArray.push_back(value);
+			}
+		}
+		Serial.print("Filtered Array (Zeros Removed): ");
+		for (int value : filteredArray) {
+			Serial.print(value);
+			Serial.print(" ");
+		}
+		Serial.println();
+	}
+
+	// Step 5: Find the mode of the filtered array
+	std::map<int, int> frequencyMap;
+	for (int value : filteredArray) {
+		frequencyMap[value]++;
+	}
+
+	int mode = 0;
+	int maxFrequency = 0;
+	for (const auto& entry : frequencyMap) {
+		if (entry.second > maxFrequency) {
+			maxFrequency = entry.second;
+			mode = entry.first;
+		}
+	}
+	Serial.print("Mode After Filtering: ");
+	Serial.print(mode);
+	Serial.print(" (Frequency: ");
+	Serial.print(maxFrequency);
+	Serial.println(")");
+
+	// Step 6: Pass the final mode to handleTrackCode
+	Serial.print("Final Track Code: ");
+	Serial.println(mode);
+	Serial.println("--- Filtering Process End ---\n");
+
+	handleTrackCode(mode);
+}
+
+
+
+
+void updateControlLogic(unsigned long now) {
+	// Update sp from cs using acceleration
+	float dt = (now - lastSetPointUpdate) / 1000.0f;
+	lastSetPointUpdate = now;
+
+	updateSetPoint(dt);
+
+	// Read encoder values
+	ms_motorSpeed = calculateMotorSpeed();
+	ws_wheelSpeed = calculateWheelSpeed();
+
+	// Detect wheel slip
+	float speedDifference = fabs(ws_wheelSpeed - ms_motorSpeed);
+
+	// Avoid division by zero
+	float percentageDifference = (ms_motorSpeed != 0) ? (speedDifference / fabs(ms_motorSpeed)) * 100.0 : 0.0;
+
+	if (fabs(ms_motorSpeed) < speedDeadband && fabs(ws_wheelSpeed) < speedDeadband) {
+		// Speeds are too small to detect slip
+		slipDetected = false;
+		slipCounter = 0;
+	}
+	else if (percentageDifference >= slipThreshold) {
+		slipDetected = true;
+		slipCounter++;
+	}
+	else {
+		slipDetected = false;
+		slipCounter = 0;
+	}
+
+	// PID control
+	pwmValue = calculatePWM(ms_motorSpeed);
+
+	// Update PWM output
+	if (ss_setSpeed == 0) {
+		ledcWrite(MOTOR_FORWARD, 0);
+		ledcWrite(MOTOR_REVERSE, 0);
+		digitalWrite(FWD_LED, LOW);
+		handleBreathingEffect();
+	}
+	else if (ss_setSpeed > 0) {
+		ledcWrite(MOTOR_FORWARD, pwmValue);
+		ledcWrite(MOTOR_REVERSE, 0);
+		digitalWrite(FWD_LED, HIGH);
+		ledcWrite(REVERSE_LED, 0);
+	}
+	else { // sp < 0
+		ledcWrite(MOTOR_FORWARD, 0);
+		ledcWrite(MOTOR_REVERSE, abs(pwmValue));
+		digitalWrite(FWD_LED, LOW);
+		ledcWrite(REVERSE_LED, 255);
+	}
+}
 
 double calculateMotorSpeed() {
 	static double filteredSpeed = 0.0;
@@ -591,7 +574,7 @@ void handleBreathingEffect() {
 
 void handleTrackCode(int code) {
 
-    Serial.println(String("-") + code);
+	Serial.println(String("-") + code);
 
 	// Check if track code switch is enabled and run away
 	if (!trackCodeSwitchEnabled) {
