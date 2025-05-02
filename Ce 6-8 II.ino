@@ -48,7 +48,7 @@ constexpr int PIDDeadband = 150;
 
 // Command/Setpoint variables
 int cs_cmdSpeed = 0; // Commanded Speed (desired motor speed mm/s)
-int ca_cmdAccel = 50; // Commanded Acceleration (desired motor acceleration mm/s^2)
+int ca_cmdAccel = 999; // Commanded Acceleration (desired motor acceleration mm/s^2)
 float ss_setSpeed = 0.0;  // Set Speed (desired motor speed mm/s)
 float sa_setAccel = 0.0; // Set Acceleration (desired motor acceleration mm/s^2)
 float ws_wheelSpeed = 0.0; // Motor Speed (measured motor speed mm/s)
@@ -287,75 +287,121 @@ void processMagneticSwitchEnd(bool& magnetLatch) {
 	}
 	Serial.println();
 
-	// Step 2: Trim the array based on the trim percentage
-	constexpr int TRIM_PERCENTAGE = 50; // Adjust this value as needed (0-100)
-	int trimSize = std::max(1, static_cast<int>(trackCodeIndex * (TRIM_PERCENTAGE / 100.0))); // Ensure trimSize is at least 1
+	// Step 2: Check if the array is all zeros
+	bool allZeros = true;
+	for (int i = 0; i < trackCodeIndex; i++) {
+		if (trackCodeArray[i] != 0) {
+			allZeros = false;
+			break;
+		}
+	}
+
+	Serial.print("Array is all zeros: ");
+	Serial.println(allZeros ? "Yes" : "No");
+
+	// Step 3: Find the largest continuous section with centrality weighting
 	int middleIndex = trackCodeIndex / 2;
-	int startIndex = std::max(0, middleIndex - trimSize / 2);
-	int endIndex = std::min(trackCodeIndex, startIndex + trimSize);
+	int bestStartIndex = -1;
+	int bestEndIndex = -1;
+	int bestLength = 0;
+	int bestValue = 0;
+	float bestScore = 0.0;
 
-	// Extract the trimmed array
-	std::vector<int> trimmedArray(trackCodeArray + startIndex, trackCodeArray + endIndex);
-	Serial.print("Trimmed Array (Center Portion, ");
-	Serial.print(TRIM_PERCENTAGE);
-	Serial.println("%):");
-	for (int value : trimmedArray) {
-		Serial.print(value);
-		Serial.print(" ");
+	// Only search for non-zero sequences if the array isn't all zeros
+	if (!allZeros) {
+		// Simple single-pass search from left to right
+		for (int startPos = 0; startPos < trackCodeIndex; startPos++) {
+			if (trackCodeArray[startPos] == 0) continue; // Skip zeros
+
+			int currentValue = trackCodeArray[startPos];
+			int endPos = startPos;
+			int nonZeroCount = 0;
+
+			// Extend the sequence as far as possible UNTIL we hit a zero or different value
+			while (endPos < trackCodeIndex && trackCodeArray[endPos] == currentValue) {
+				nonZeroCount++;
+				endPos++;
+			}
+
+			// Calculate score with centrality weighting only
+			int seqMiddle = (startPos + endPos - 1) / 2;
+			float distanceFromMiddle = abs(middleIndex - seqMiddle);
+			float centralityWeight = 1.0 - (distanceFromMiddle / (float)trackCodeIndex);
+
+			// Calculate final score (no value weighting)
+			float score = nonZeroCount * (centralityWeight * 2);
+
+			Serial.print("Candidate: value=");
+			Serial.print(currentValue);
+			Serial.print(", count=");
+			Serial.print(nonZeroCount);
+			Serial.print(", centrality=");
+			Serial.print(centralityWeight, 2);
+			Serial.print(", score=");
+			Serial.println(score, 2);
+
+			if (score > bestScore) {
+				bestStartIndex = startPos;
+				bestEndIndex = endPos - 1;
+				bestLength = nonZeroCount;
+				bestValue = currentValue;
+				bestScore = score;
+			}
+
+			// Jump to the end of this sequence for next iteration
+			startPos = endPos - 1;
+		}
 	}
-	Serial.println();
 
-	// Step 3: Check if the array is all zeros
-	bool allZeros = std::all_of(trimmedArray.begin(), trimmedArray.end(), [](int value) { return value == 0; });
+	// If the array is all zeros or no significant sequence found
+	if (allZeros || bestLength == 0) {
+		Serial.println("Using mode of entire array");
 
-	// Step 4: Filter out zeros if the array is not all zeros
-	std::vector<int> filteredArray;
-	if (allZeros) {
-		Serial.println("Array is all zeros. Skipping zero filtering.");
-		filteredArray = trimmedArray; // Keep the array as is
-	}
-	else {
-		for (int value : trimmedArray) {
-			if (value != 0) {
-				filteredArray.push_back(value);
+		// Calculate the mode of the entire array
+		std::map<int, int> frequencyMap;
+		for (int i = 0; i < trackCodeIndex; i++) {
+			frequencyMap[trackCodeArray[i]]++;
+		}
+
+		int mode = 0;
+		int maxFrequency = 0;
+		for (const auto& entry : frequencyMap) {
+			if (entry.second > maxFrequency) {
+				maxFrequency = entry.second;
+				mode = entry.first;
 			}
 		}
-		Serial.print("Filtered Array (Zeros Removed): ");
-		for (int value : filteredArray) {
-			Serial.print(value);
-			Serial.print(" ");
-		}
-		Serial.println();
+
+		Serial.print("Mode: ");
+		Serial.print(mode);
+		Serial.print(" (Frequency: ");
+		Serial.print(maxFrequency);
+		Serial.println(")");
+
+		handleTrackCode(mode);
+	}
+	else {
+		// Found a significant continuous sequence
+		Serial.print("Found best sequence of ");
+		Serial.print(bestValue);
+		Serial.print(" from index ");
+		Serial.print(bestStartIndex);
+		Serial.print(" to ");
+		Serial.print(bestEndIndex);
+		Serial.print(" (Length: ");
+		Serial.print(bestLength);
+		Serial.print(", ");
+		Serial.print((float)bestLength / trackCodeIndex * 100.0, 1);
+		Serial.print("% of array, Score: ");
+		Serial.print(bestScore, 2);
+		Serial.println(")");
+
+		// Use the value of the sequence as the track code
+		handleTrackCode(bestValue);
 	}
 
-	// Step 5: Find the mode of the filtered array
-	std::map<int, int> frequencyMap;
-	for (int value : filteredArray) {
-		frequencyMap[value]++;
-	}
-
-	int mode = 0;
-	int maxFrequency = 0;
-	for (const auto& entry : frequencyMap) {
-		if (entry.second > maxFrequency) {
-			maxFrequency = entry.second;
-			mode = entry.first;
-		}
-	}
-	Serial.print("Mode After Filtering: ");
-	Serial.print(mode);
-	Serial.print(" (Frequency: ");
-	Serial.print(maxFrequency);
-	Serial.println(")");
-
-	// Step 6: Pass the final mode to handleTrackCode
-	Serial.print("Final Track Code: ");
-	Serial.println(mode);
 	Serial.println("--- Filtering Process End ---\n");
-
-	handleTrackCode(mode);
 }
-
 
 
 
