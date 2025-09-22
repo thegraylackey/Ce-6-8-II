@@ -41,21 +41,23 @@ constexpr double GEAR_RATIO = 0.0889;
 constexpr double DRIVEN_WHEEL_CONVERSION = (PI * DRIVEN_WHEEL_DIAMETER) / 60.0 * GEAR_RATIO;
 constexpr double UNDRIVEN_WHEEL_CONVERSION = (PI * UNDRIVEN_WHEEL_DIAMETER) / 60.0;
 
-constexpr int PWM_FREQUENCY = 200;
+constexpr int PWM_FREQUENCY = 17500;
 constexpr int PWM_RESOLUTION = 10; // 10bit 0-1023
 constexpr int jogSpeedIncrement = 100; // mm/s
-constexpr int PIDDeadband = 150;
+constexpr int PIDDeadband = 590;
 
 // Command/Setpoint variables
 int cs_cmdSpeed = 0; // Commanded Speed (desired motor speed mm/s)
-int ca_cmdAccel = 999; // Commanded Acceleration (desired motor acceleration mm/s^2)
+int ca_cmdAccel = 100; // Commanded Acceleration (desired motor acceleration mm/s^2)
 float ss_setSpeed = 0.0;  // Set Speed (desired motor speed mm/s)
 float sa_setAccel = 0.0; // Set Acceleration (desired motor acceleration mm/s^2)
 float ws_wheelSpeed = 0.0; // Motor Speed (measured motor speed mm/s)
 float ms_motorSpeed = 0.0;  // Wheel Speed (measured wheel speed mm/s)
+float as_avgSpeed = 0.0; // Average Speed (average of motor and wheel speed mm/s)
+int percentThrottle = 0; // Percent of max power (0-100%)
 
 // PID parameters
-float Kp = 1.0;
+float Kp = 0.2;
 float Ki = 0.1;
 float Kd = 0.1;
 float integral = 0.0;
@@ -69,7 +71,7 @@ constexpr int PCNT_H_LIM = 32767;
 constexpr int PCNT_L_LIM = -32768;
 
 //Wheel Slip
-int slipThreshold = 50;
+int slipThreshold = 100;
 int slipCounter = 0;
 int speedDeadband = 25;
 bool slipDetected = false;
@@ -227,7 +229,8 @@ void loop() {
 	}
 
 	// Update display logic directly
-	if (now - lastDisplayUpdateTime >= DisplayUpdateInterval) {
+	if (now - lastDisplayUpdateTime >= DisplayUpdateInterval 
+		&& digitalRead(TRACK_CODE_MAGNET_PIN_R) == HIGH) {
 		lastDisplayUpdateTime = now;
 		updateDisplay(ms_motorSpeed, ws_wheelSpeed, ss_setSpeed, pwmValue, binaryString, binaryNumber);
 	}
@@ -269,7 +272,6 @@ void processMagneticSwitch(bool& magnetLatch, int magnetPin) {
 	if (trackCodeIndex < MAX_TRACK_CODES) {
 		readBinarySensors();
 		trackCodeArray[trackCodeIndex++] = binaryNumber;
-		Serial.print(binaryNumber);
 	}
 }
 
@@ -277,9 +279,8 @@ void processMagneticSwitchEnd(bool& magnetLatch) {
 	digitalWrite(TRACK_CODE_IR_LED_PIN, HIGH);
 	magnetLatch = false;
 
-	Serial.println("\n--- Filtering Process Start ---");
-
 	// Step 1: Log the original array
+	Serial.println();
 	Serial.print("Original Array: ");
 	for (int i = 0; i < trackCodeIndex; i++) {
 		Serial.print(trackCodeArray[i]);
@@ -295,9 +296,6 @@ void processMagneticSwitchEnd(bool& magnetLatch) {
 			break;
 		}
 	}
-
-	Serial.print("Array is all zeros: ");
-	Serial.println(allZeros ? "Yes" : "No");
 
 	// Step 3: Find the largest continuous section with centrality weighting
 	int middleIndex = trackCodeIndex / 2;
@@ -329,16 +327,16 @@ void processMagneticSwitchEnd(bool& magnetLatch) {
 			float centralityWeight = 1.0 - (distanceFromMiddle / (float)trackCodeIndex);
 
 			// Calculate final score (no value weighting)
-			float score = nonZeroCount * (centralityWeight * 2);
+			float score = nonZeroCount * (centralityWeight * 4);
 
-			Serial.print("Candidate: value=");
-			Serial.print(currentValue);
-			Serial.print(", count=");
-			Serial.print(nonZeroCount);
-			Serial.print(", centrality=");
-			Serial.print(centralityWeight, 2);
-			Serial.print(", score=");
-			Serial.println(score, 2);
+			//Serial.print("Candidate: value=");
+			//Serial.print(currentValue);
+			//Serial.print(", count=");
+			//Serial.print(nonZeroCount);
+			//Serial.print(", centrality=");
+			//Serial.print(centralityWeight, 2);
+			//Serial.print(", score=");
+			//Serial.println(score, 2);
 
 			if (score > bestScore) {
 				bestStartIndex = startPos;
@@ -395,15 +393,15 @@ void processMagneticSwitchEnd(bool& magnetLatch) {
 		Serial.print("% of array, Score: ");
 		Serial.print(bestScore, 2);
 		Serial.println(")");
+		Serial.println(bestValue);
+		Serial.println();
 
 		// Use the value of the sequence as the track code
 		handleTrackCode(bestValue);
+		updateDisplay(ms_motorSpeed, ws_wheelSpeed, ss_setSpeed, pwmValue, binaryString, binaryNumber);
 	}
 
-	Serial.println("--- Filtering Process End ---\n");
 }
-
-
 
 void updateControlLogic(unsigned long now) {
 	// Update sp from cs using acceleration
@@ -415,6 +413,7 @@ void updateControlLogic(unsigned long now) {
 	// Read encoder values
 	ms_motorSpeed = calculateMotorSpeed();
 	ws_wheelSpeed = calculateWheelSpeed();
+	as_avgSpeed = (ms_motorSpeed + ws_wheelSpeed) / 2.0;
 
 	// Detect wheel slip
 	float speedDifference = fabs(ws_wheelSpeed - ms_motorSpeed);
@@ -427,7 +426,7 @@ void updateControlLogic(unsigned long now) {
 		slipDetected = false;
 		slipCounter = 0;
 	}
-	else if (percentageDifference >= slipThreshold) {
+	else if (percentageDifference >= slipThreshold  && trackCodeSwitchEnabled) {
 		slipDetected = true;
 		slipCounter++;
 	}
@@ -614,13 +613,11 @@ void handleBreathingEffect() {
 	unsigned long currentTime = millis();
 	float phase = (currentTime % breathInterval) / (float)breathInterval;
 	int brightness = (sin(phase * 2 * PI) + 1) * 255;
-	brightness = map(brightness, 0, 255, 0, 32);
+	brightness = map(brightness, 0, 255, 0, 127);
 	ledcWrite(REVERSE_LED, brightness);
 }
 
 void handleTrackCode(int code) {
-
-	Serial.println(String("-") + code);
 
 	// Check if track code switch is enabled and run away
 	if (!trackCodeSwitchEnabled) {
@@ -629,7 +626,7 @@ void handleTrackCode(int code) {
 
 	switch (code) {
 	case 0:
-		cs_cmdSpeed = (cs_cmdSpeed > 0) ? -200 : 200; // 100 mm/s, reverse
+		cs_cmdSpeed = (cs_cmdSpeed > 0) ? -100 : 100; // 100 mm/s, reverse
 		break;
 	case 1:
 		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 100 : -100;
@@ -643,8 +640,23 @@ void handleTrackCode(int code) {
 	case 4:
 		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 400 : -400;
 		break;
+	case 5:
+		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 500 : -500;
+		break;
+	case 6:
+		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 600 : -600;
+		break;
+	case 7:
+		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 700 : -700;
+		break;
+	case 8:
+		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 800 : -800;
+		break;
+	case 9:
+		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 900 : -900;
+		break;
 	default:
-		//cs_cmdSpeed = 0; // Stop
+		cs_cmdSpeed = 0;
 		break;
 	}
 }
@@ -685,19 +697,42 @@ void readButtonStates() {
 }
 
 void readBinarySensors() {
+	// Read raw binary values from pins
+	int bit0 = (~digitalRead(TRACK_CODE_BINARY_PIN_0) & 0x01);
+	int bit1 = (~digitalRead(TRACK_CODE_BINARY_PIN_1) & 0x01);
+	int bit2 = (~digitalRead(TRACK_CODE_BINARY_PIN_2) & 0x01);
+	int bit3 = (~digitalRead(TRACK_CODE_BINARY_PIN_3) & 0x01);
+	int bit4 = (~digitalRead(TRACK_CODE_BINARY_PIN_4) & 0x01);
+	int bit5 = (~digitalRead(TRACK_CODE_BINARY_PIN_5) & 0x01);
+
+	// If moving backward (negative speed), rotate 180 degrees by reversing bit order
+	if (cs_cmdSpeed < 0) {
+		// Swap bit positions to rotate 180 degrees
+		int temp0 = bit0;
+		int temp1 = bit1;
+		int temp2 = bit2;
+
+		bit0 = bit5;
+		bit1 = bit4;
+		bit2 = bit3;
+		bit3 = temp2;
+		bit4 = temp1;
+		bit5 = temp0;
+	}
+
+	// Assemble the binary number
 	binaryNumber = 0;
-	binaryNumber |= (~digitalRead(TRACK_CODE_BINARY_PIN_0) & 0x01) << 0;
-	binaryNumber |= (~digitalRead(TRACK_CODE_BINARY_PIN_1) & 0x01) << 1;
-	binaryNumber |= (~digitalRead(TRACK_CODE_BINARY_PIN_2) & 0x01) << 2;
-	binaryNumber |= (~digitalRead(TRACK_CODE_BINARY_PIN_3) & 0x01) << 3;
-	binaryNumber |= (~digitalRead(TRACK_CODE_BINARY_PIN_4) & 0x01) << 4;
-	binaryNumber |= (~digitalRead(TRACK_CODE_BINARY_PIN_5) & 0x01) << 5;
-	binaryString = String(~digitalRead(TRACK_CODE_BINARY_PIN_0) & 0x01) +
-		String(~digitalRead(TRACK_CODE_BINARY_PIN_1) & 0x01) +
-		String(~digitalRead(TRACK_CODE_BINARY_PIN_2) & 0x01) +
-		String(~digitalRead(TRACK_CODE_BINARY_PIN_3) & 0x01) +
-		String(~digitalRead(TRACK_CODE_BINARY_PIN_4) & 0x01) +
-		String(~digitalRead(TRACK_CODE_BINARY_PIN_5) & 0x01);
+	binaryNumber |= bit0 << 0;
+	binaryNumber |= bit1 << 1;
+	binaryNumber |= bit2 << 2;
+	binaryNumber |= bit3 << 3;
+	binaryNumber |= bit4 << 4;
+	binaryNumber |= bit5 << 5;
+
+	// Create the binary string representation
+	binaryString = String(bit0) + String(bit1) + String(bit2) +
+		String(bit3) + String(bit4) + String(bit5);
+
 }
 
 int calculatePWM(float measuredSpeed) {
@@ -751,6 +786,8 @@ int calculatePWM(float measuredSpeed) {
 	if (pwmValue == PIDDeadband || pwmValue == -PIDDeadband) {
 		pwmValue = 0;
 	}
+
+	percentThrottle = map(abs(pwmValue), 0, 1023, 0, 100);
 
 	return pwmValue;
 }
