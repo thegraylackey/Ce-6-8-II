@@ -57,8 +57,8 @@ float as_avgSpeed = 0.0; // Average Speed (average of motor and wheel speed mm/s
 int percentThrottle = 0; // Percent of max power (0-100%)
 
 // PID parameters
-float Kp = 0.2;
-float Ki = 0.1;
+float Kp = 0.3;
+float Ki = 0.2;
 float Kd = 0.1;
 float integral = 0.0;
 float derivative = 0.0;
@@ -71,7 +71,7 @@ constexpr int PCNT_H_LIM = 32767;
 constexpr int PCNT_L_LIM = -32768;
 
 //Wheel Slip
-int slipThreshold = 100;
+int slipThreshold = 50;
 int slipCounter = 0;
 int speedDeadband = 25;
 bool slipDetected = false;
@@ -144,6 +144,10 @@ int trackCodeIndex = 0;
 String binaryString;
 int binaryNumber;
 
+// Status message buffer
+constexpr int STATUS_MSG_COUNT = 3;
+String statusMessages[STATUS_MSG_COUNT] = {"", "", ""};
+
 // Forward declarations
 void readButtonStates();
 void handleTrackCode(int code);
@@ -152,6 +156,8 @@ double calculateMotorSpeed();
 double calculateWheelSpeed();
 int calculatePWM(float measuredSpeed);
 void updateSetPoint(float dt);
+void addStatusMessage(const String& msg);
+void drawDirectionArrow(int x, int y, int w, int h);
 
 // **********************************
 // Setup
@@ -232,9 +238,67 @@ void loop() {
 	if (now - lastDisplayUpdateTime >= DisplayUpdateInterval 
 		&& digitalRead(TRACK_CODE_MAGNET_PIN_R) == HIGH) {
 		lastDisplayUpdateTime = now;
-		updateDisplay(ms_motorSpeed, ws_wheelSpeed, ss_setSpeed, pwmValue, binaryString, binaryNumber);
+		updateDisplay();
 	}
 
+}
+
+
+void addStatusMessage(const String& msg) {
+    // Shift messages down
+    for (int i = STATUS_MSG_COUNT - 1; i > 0; i--) {
+        statusMessages[i] = statusMessages[i - 1];
+    }
+    statusMessages[0] = msg;
+}
+
+void drawDirectionArrow(int x, int y, int w, int h) {
+    int thickness = 3; // Thickness for arrow lines
+    if (ss_setSpeed > 0) {
+        // Up arrow, thick lines
+        for (int t = -thickness/2; t <= thickness/2; t++) {
+            display.drawLine(x + w/2 + t, y + h, x + w/2 + t, y, SH110X_WHITE);
+        }
+        display.fillTriangle(
+            x + w/2, y,
+            x, y + h/2,
+            x + w, y + h/2,
+            SH110X_WHITE
+        );
+    } else if (ss_setSpeed < 0) {
+        // Down arrow, thick lines
+        for (int t = -thickness/2; t <= thickness/2; t++) {
+            display.drawLine(x + w/2 + t, y, x + w/2 + t, y + h, SH110X_WHITE);
+        }
+        display.fillTriangle(
+            x + w/2, y + h,
+            x, y + h/2,
+            x + w, y + h/2,
+            SH110X_WHITE
+        );
+    } else {
+        // Filled octagon for stopped
+        int ox[8], oy[8];
+        int r = w / 2 - 1;
+        int cx = x + w / 2;
+        int cy = y + h / 2;
+        for (int i = 0; i < 8; i++) {
+            float angle = PI / 4 * i + PI / 8;
+            ox[i] = cx + (int)(r * cos(angle));
+            oy[i] = cy + (int)(r * sin(angle));
+        }
+        // Fill octagon using triangles from center to each edge
+        for (int i = 0; i < 8; i++) {
+            int next = (i + 1) % 8;
+            display.fillTriangle(cx, cy, ox[i], oy[i], ox[next], oy[next], SH110X_WHITE);
+        }
+        // Draw a black rectangle at the center
+        int rectW = w / 2.5;
+        int rectH = h / 4.5;
+        int rectX = cx - rectW / 2;
+        int rectY = cy - rectH / 2;
+        display.fillRect(rectX, rectY, rectW, rectH, SH110X_BLACK);
+    }
 }
 
 
@@ -398,7 +462,7 @@ void processMagneticSwitchEnd(bool& magnetLatch) {
 
 		// Use the value of the sequence as the track code
 		handleTrackCode(bestValue);
-		updateDisplay(ms_motorSpeed, ws_wheelSpeed, ss_setSpeed, pwmValue, binaryString, binaryNumber);
+		updateDisplay();
 	}
 
 }
@@ -523,90 +587,56 @@ void updateSetPoint(float dt) {
 	}
 }
 
-void updateDisplay(float measuredSpeed, float measuredSpeed2, float targetSpeed, int pwmVal, const String& binaryString, int binaryNumber) {
-	display.clearDisplay();
-	display.setCursor(0, 0);
+void updateDisplay() {
+    display.clearDisplay();
+    // Top left: direction arrow/box (3 lines tall)
+    int arrowX = 0;
+    int arrowY = 0;
+    int arrowW = 18;
+    int arrowH = 24;
+    drawDirectionArrow(arrowX, arrowY, arrowW, arrowH);
 
-	// Display Commanded Speed and Acceleration
-	display.print(F("CS: "));
-	display.print(round(cs_cmdSpeed), 0);
-	display.print(F(" CA: "));
-	display.println(round(ca_cmdAccel), 0);
+    // Set speed (right of arrow, one line, rounded, no units)
+    display.setCursor(arrowX + arrowW + 2, arrowY);
+    display.setTextSize(1);
+    display.print((int)round(ss_setSpeed));
+    display.print(" mm/s");
 
-	// Display Set Speed and Acceleration
-	display.print(F("SS: "));
-	display.print(round(ss_setSpeed), 0);
-	display.print(F(" SA: "));
-	display.println(round(sa_setAccel), 0);
+    // Average speed (two lines high, rounded, no units)
+    display.setTextSize(2);
+    display.setCursor(arrowX + arrowW + 2, arrowY + 10);
+    display.print((int)round(as_avgSpeed));
+    display.setTextSize(1);
 
-	// Display Motor Speed
-	display.print(F("MS: "));
-	display.println(round(ms_motorSpeed), 0);
+    // Top right: throttle percent, two lines high, no label
+    display.setTextSize(2);
+    int throttleChars = String(percentThrottle).length();
+    int charWidth = 12; // Approximate width per character in text size 2
+    int throttleX = display.width() - (throttleChars * charWidth) - 12; // 2px padding from right
+    display.setCursor(throttleX, 0);
+    display.print(percentThrottle);
+    if (percentThrottle < 100) {
+        display.print("%");
+    }
+    display.setTextSize(1);
 
-	// Display Wheel Speed
-	display.print(F("WS: "));
-	display.println(round(ws_wheelSpeed), 0);
+    // Bottom: spinning symbol and slip indicator above three lines of status messages
+    int statusY = display.height() - 8 * STATUS_MSG_COUNT - 8; // 8px for symbol line
+    display.setCursor(0, statusY);
+    display.print(rotatingSymbols[symbolIndex]);
+    // Print "Slip!" to the right if slipDetected
+    if (slipDetected) {
+        display.setCursor(20, statusY); // 20px to the right of symbol
+        display.print("Slip!");
+    }
+    symbolIndex = (symbolIndex + 1) % 4;
 
-	if (slipDetected) {
-		display.print(F("SLIP"));
-	}
-
-
-	// Display binary string in 2x3 grid at the top right
-	int startX = display.width() - 18;
-	int startY = 0;
-
-	display.setCursor(startX - 6, startY);
-	display.print(trackCodeSwitchEnabled ? F("ENAB") : F("DISA"));
-
-	display.setCursor(startX, startY + 8);
-	display.print(binaryString[0]);
-	display.setCursor(startX + 6, startY + 8);
-	display.print(binaryString[1]);
-
-	display.setCursor(startX - 6, startY + 16);
-	if (digitalRead(TRACK_CODE_MAGNET_PIN_L) == LOW && cs_cmdSpeed <= 0) {
-		display.print(F("L"));
-	}
-	else {
-		display.print(F("0"));
-	}
-
-	display.setCursor(startX, startY + 16);
-	display.print(binaryString[2]);
-	display.setCursor(startX + 6, startY + 16);
-	display.print(binaryString[3]);
-
-	if (digitalRead(TRACK_CODE_MAGNET_PIN_R) == LOW && cs_cmdSpeed >= 0) {
-		display.print(F("R"));
-	}
-	else {
-		display.print(F("0"));
-	}
-
-	display.setCursor(startX, startY + 24);
-	display.print(binaryString[4]);
-	display.setCursor(startX + 6, startY + 24);
-	display.print(binaryString[5]);
-
-	display.setCursor(startX, startY + 32);
-	display.print(binaryNumber < 10 ? "0" + String(binaryNumber) : String(binaryNumber));
-
-	// Display rotating symbol
-	display.setCursor(0, display.height() - 8);
-	display.print(rotatingSymbols[symbolIndex]);
-	display.print(F(" i"));
-	display.print(integral, 0);
-	display.print(F(" d"));
-	display.print(derivative, 1);
-
-	display.setCursor(0, display.height() - 16);
-	display.print(F("PWM:"));
-	display.print(pwmVal);
-
-	symbolIndex = (symbolIndex + 1) % 4;
-
-	display.display();
+    // Now print the three status messages below the symbol
+    for (int i = 0; i < STATUS_MSG_COUNT; i++) {
+        display.setCursor(0, statusY + 8 + i * 8);
+        display.print(statusMessages[i]);
+    }
+    display.display();
 }
 
 void handleBreathingEffect() {
@@ -627,73 +657,80 @@ void handleTrackCode(int code) {
 	switch (code) {
 	case 0:
 		cs_cmdSpeed = (cs_cmdSpeed > 0) ? -100 : 100; // 100 mm/s, reverse
+		addStatusMessage("Code " + String(code) + " CS: " + String(cs_cmdSpeed));
 		break;
 	case 1:
 		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 100 : -100;
+		addStatusMessage("Code " + String(code) + " CS: " + String(cs_cmdSpeed));
 		break;
 	case 2:
 		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 200 : -200;
+		addStatusMessage("Code " + String(code) + " CS: " + String(cs_cmdSpeed));
 		break;
 	case 3:
 		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 300 : -300;
+		addStatusMessage("Code " + String(code) + " CS: " + String(cs_cmdSpeed));
 		break;
 	case 4:
 		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 400 : -400;
+		addStatusMessage("Code " + String(code) + " CS: " + String(cs_cmdSpeed));
 		break;
 	case 5:
 		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 500 : -500;
+		addStatusMessage("Code " + String(code) + " CS: " + String(cs_cmdSpeed));
 		break;
 	case 6:
 		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 600 : -600;
+		addStatusMessage("Code " + String(code) + " CS: " + String(cs_cmdSpeed));
 		break;
 	case 7:
 		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 700 : -700;
-		break;
-	case 8:
-		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 800 : -800;
-		break;
-	case 9:
-		cs_cmdSpeed = (cs_cmdSpeed >= 0) ? 900 : -900;
+		addStatusMessage("Code " + String(code) + " CS: " + String(cs_cmdSpeed));
 		break;
 	default:
 		cs_cmdSpeed = 0;
+		addStatusMessage("Code Unknown CS: " + String(cs_cmdSpeed));
 		break;
 	}
 }
 
 void readButtonStates() {
-	buttonStateA = digitalRead(BUTTON_A);
-	buttonStateB = digitalRead(BUTTON_B);
-	buttonStateC = digitalRead(BUTTON_C);
+    buttonStateA = digitalRead(BUTTON_A);
+    buttonStateB = digitalRead(BUTTON_B);
+    buttonStateC = digitalRead(BUTTON_C);
 
-	static unsigned long lastButtonBPressTime = 0;
-	static bool buttonBPressedOnce = false;
+    static unsigned long lastButtonBPressTime = 0;
+    static bool buttonBPressedOnce = false;
 
-	if (buttonStateA == LOW && lastButtonStateA == HIGH) {
-		cs_cmdSpeed += jogSpeedIncrement;
-	}
+    if (buttonStateA == LOW && lastButtonStateA == HIGH) {
+        cs_cmdSpeed += jogSpeedIncrement;
+		addStatusMessage("CS " + String(cs_cmdSpeed));
+    }
 
-	if (buttonStateB == LOW && lastButtonStateB == HIGH) {
-		unsigned long currentTime = millis();
-		if (buttonBPressedOnce && (currentTime - lastButtonBPressTime) < 500) {
-			trackCodeSwitchEnabled = !trackCodeSwitchEnabled;
-			buttonBPressedOnce = false;
-		}
-		else {
-			buttonBPressedOnce = true;
-			lastButtonBPressTime = currentTime;
-			cs_cmdSpeed = 0;
-			integral = 0.0;
-		}
-	}
+    if (buttonStateB == LOW && lastButtonStateB == HIGH) {
+        unsigned long currentTime = millis();
+        if (buttonBPressedOnce && (currentTime - lastButtonBPressTime) < 500) {
+            trackCodeSwitchEnabled = !trackCodeSwitchEnabled;
+            buttonBPressedOnce = false;
+            addStatusMessage(trackCodeSwitchEnabled ? "Track code ON" : "Track code OFF");
+        }
+        else {
+            buttonBPressedOnce = true;
+            lastButtonBPressTime = currentTime;
+            cs_cmdSpeed = 0;
+            integral = 0.0;
+            addStatusMessage("Stop");
+        }
+    }
 
-	if (buttonStateC == LOW && lastButtonStateC == HIGH) {
-		cs_cmdSpeed -= jogSpeedIncrement;
-	}
+    if (buttonStateC == LOW && lastButtonStateC == HIGH) {
+        cs_cmdSpeed -= jogSpeedIncrement;
+        addStatusMessage("CS " + String(cs_cmdSpeed));
+    }
 
-	lastButtonStateA = buttonStateA;
-	lastButtonStateB = buttonStateB;
-	lastButtonStateC = buttonStateC;
+    lastButtonStateA = buttonStateA;
+    lastButtonStateB = buttonStateB;
+    lastButtonStateC = buttonStateC;
 }
 
 void readBinarySensors() {
@@ -787,10 +824,11 @@ int calculatePWM(float measuredSpeed) {
 		pwmValue = 0;
 	}
 
-	percentThrottle = map(abs(pwmValue), 0, 1023, 0, 100);
+	percentThrottle = map(abs(pwmValue), PIDDeadband, 1023, 0, 100);
+	if (percentThrottle < 0)
+	{
+		percentThrottle = 0;
+	}
 
 	return pwmValue;
 }
-
-
-
